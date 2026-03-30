@@ -51,8 +51,8 @@ class BackgroundManager:
     def __init__(self):
         self.tasks = {}  # task_id -> {status, result, command}
         self._notification_queue = []  # completed task results
-        self._tasks_lock = threading.Lock()  # 保护 self.tasks
-        self._queue_lock = threading.Lock()  # 保护 _notification_queue
+        self._tasks_lock = threading.Lock()  # protect self.tasks
+        self._queue_lock = threading.Lock()  # protect _notification_queue
 
     def run(self, command: str) -> str:
         """Start a background thread, return task_id immediately."""
