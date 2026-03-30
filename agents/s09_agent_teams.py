@@ -54,11 +54,12 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+# if os.getenv("ANTHROPIC_BASE_URL"):
+#     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
+client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"),
+                   auth_token=os.getenv("ANTHROPIC_AUTH_TOKEN"))
 MODEL = os.environ["MODEL_ID"]
 TEAM_DIR = WORKDIR / ".team"
 INBOX_DIR = TEAM_DIR / "inbox"
@@ -120,6 +121,32 @@ class MessageBus:
 BUS = MessageBus(INBOX_DIR)
 
 
+# -- Teammate tools --
+TEAMMATE_TOOLS = [
+    {"name": "bash", "description": "Run a shell command.",
+     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"name": "read_file", "description": "Read file contents.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
+    {"name": "write_file", "description": "Write content to file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"name": "edit_file", "description": "Replace exact text in file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"name": "send_message", "description": "Send message to a teammate.",
+     "input_schema": {"type": "object", "properties": {"to": {"type": "string"}, "content": {"type": "string"}, "msg_type": {"type": "string", "enum": list(VALID_MSG_TYPES)}}, "required": ["to", "content"]}},
+    {"name": "read_inbox", "description": "Read and drain your inbox.",
+     "input_schema": {"type": "object", "properties": {}}},
+]
+# -- Teammate tool handlers --
+TEAMMATE_HANDLERS = {
+    "bash": lambda name, args: _run_bash(args["command"]),
+    "read_file": lambda name, args: _run_read(args["path"]),
+    "write_file": lambda name, args: _run_write(args["path"], args["content"]),
+    "edit_file": lambda name, args: _run_edit(args["path"], args["old_text"], args["new_text"]),
+    "send_message": lambda name, args: BUS.send(name, args["to"], args["content"], args.get("msg_type", "message")),
+    "read_inbox": lambda name, args: json.dumps(BUS.read_inbox(name), indent=2),
+}
+
+
 # -- TeammateManager: persistent named agents with config.json --
 class TeammateManager:
     def __init__(self, team_dir: Path):
@@ -169,7 +196,6 @@ class TeammateManager:
             f"Use send_message to communicate. Complete your task."
         )
         messages = [{"role": "user", "content": prompt}]
-        tools = self._teammate_tools()
         for _ in range(50):
             inbox = BUS.read_inbox(name)
             for msg in inbox:
@@ -179,7 +205,7 @@ class TeammateManager:
                     model=MODEL,
                     system=sys_prompt,
                     messages=messages,
-                    tools=tools,
+                    tools=TEAMMATE_TOOLS,
                     max_tokens=8000,
                 )
             except Exception:
@@ -190,7 +216,11 @@ class TeammateManager:
             results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    output = self._exec(name, block.name, block.input)
+                    handler = TEAMMATE_HANDLERS.get(block.name)
+                    try:
+                        output = handler(name, block.input) if handler else f"Unknown tool: {block.name}"
+                    except Exception as e:
+                        output = f"Error: {e}"
                     print(f"  [{name}] {block.name}: {str(output)[:120]}")
                     results.append({
                         "type": "tool_result",
@@ -218,23 +248,6 @@ class TeammateManager:
         if tool_name == "read_inbox":
             return json.dumps(BUS.read_inbox(sender), indent=2)
         return f"Unknown tool: {tool_name}"
-
-    def _teammate_tools(self) -> list:
-        # these base tools are unchanged from s02
-        return [
-            {"name": "bash", "description": "Run a shell command.",
-             "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-            {"name": "read_file", "description": "Read file contents.",
-             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
-            {"name": "write_file", "description": "Write content to file.",
-             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-            {"name": "edit_file", "description": "Replace exact text in file.",
-             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-            {"name": "send_message", "description": "Send message to a teammate.",
-             "input_schema": {"type": "object", "properties": {"to": {"type": "string"}, "content": {"type": "string"}, "msg_type": {"type": "string", "enum": list(VALID_MSG_TYPES)}}, "required": ["to", "content"]}},
-            {"name": "read_inbox", "description": "Read and drain your inbox.",
-             "input_schema": {"type": "object", "properties": {}}},
-        ]
 
     def list_all(self) -> str:
         if not self.config["members"]:
